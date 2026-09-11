@@ -1,0 +1,124 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Predicting returns, and what coverage should cost</title>
+<!--
+  EDITABLE SOURCE. Change any text below, then run:  python memo/build_memo.py
+  Figures are referenced relatively from ../figures/ — regenerate them by running the notebooks.
+-->
+<style>
+  @page { size: letter; margin: 13mm 14mm; }
+  * { box-sizing: border-box; }
+  body { font: 9.4pt/1.44 system-ui, -apple-system, "Segoe UI", sans-serif; color: #0b0b0b;
+         background: #fcfcfb; margin: 0; }
+  h1 { font-size: 15.5pt; margin: 0 0 1mm; letter-spacing: -0.2px; }
+  .sub { color: #52514e; font-size: 9pt; margin: 0 0 3.5mm; }
+  h2 { font-size: 11pt; margin: 5mm 0 1.5mm; padding-bottom: 1mm; border-bottom: 1.5px solid #c3c2b7; }
+  p { margin: 0 0 2mm; }
+  table { border-collapse: collapse; width: 100%; font-size: 8.4pt; margin: 1.5mm 0 2.5mm; }
+  th, td { text-align: right; padding: 1mm 1.5mm; border-bottom: 1px solid #e1e0d9;
+           font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  th { color: #52514e; font-weight: 600; border-bottom: 1px solid #c3c2b7; }
+  .figs { display: flex; gap: 4mm; align-items: flex-start; margin-bottom: 2.5mm; }
+  .figs figure { margin: 0; flex: 1; }
+  figure img { width: 100%; display: block; }
+  figcaption { color: #52514e; font-size: 7.5pt; margin-top: 0.8mm; }
+  strong { font-weight: 650; }
+  .note { color: #52514e; font-size: 7.7pt; border-top: 1px solid #e1e0d9; padding-top: 1.2mm; margin-top: 3mm; }
+  .big { font-size: 8.7pt; }
+  .rule { text-align: center; font-size: 10.4pt; margin: 3mm 0; }
+  h2 { break-after: avoid; page-break-after: avoid; }
+  .figs, table, figure { break-inside: avoid; page-break-inside: avoid; }
+</style></head><body>
+
+<h1>Predicting returns, and what coverage should cost</h1>
+<p class="sub">Morgan Cooper &middot; how I approached pricing returns coverage, on 2.3M real order lines</p>
+
+<h2>How I went about it</h2>
+<p>Paid returns coverage is an insurance product sold at checkout, and it lives or dies on one number per order: how likely this order is to come back. If that number is trustworthy in absolute terms &mdash; not just good at ranking &mdash; the price follows from it. If it is not, every price is a guess.</p>
+<p>I used the Data Mining Cup 2016 set: <strong>2,325,165 order lines</strong> from an anonymised European fashion retailer. I chose it over the usual Kaggle options because it carries a <strong>real return label</strong>, so I would not spend this memo defending a proxy invented from review scores. Collapsing the lines gives <strong>738,698 orders</strong>, labelled by whether anything came back &mdash; the unit a policy actually pays out on. This book returns <strong>63.5% of orders</strong>, the global high-water mark for fashion, so the pricing is swept across gentler return rates at the end.</p>
+<p>I trained on the 624,732 orders before 2015-07-01 and scored the 113,966 that followed, so the model is only ever predicting forward. Nothing a customer did after an order was placed is allowed to inform that order's features. I unit-tested the helper enforcing that against a hand-worked example, because my first version of it was silently wrong and still produced entirely plausible numbers.</p>
+
+<h2>What I found in the data</h2>
+<div class="figs">
+  <figure><img src="../figures/eda_cuts.png" alt="Four bar charts: return rate by basket size, by bracketing, by payment method, and by customer history, each against the 63.5% overall rate">
+  <figcaption>Four things visible the moment an order is placed. Grey line is the 63.5% overall rate; counts are printed so a tall bar built on few orders cannot pass as signal.</figcaption></figure>
+</div>
+<p><strong>Bracketing is the clearest signal in the dataset.</strong> When a shopper orders the <strong>same article in two or more sizes</strong>, something comes back <strong>96%</strong> of the time &mdash; against 54% for orders with no bracketing at all. Nobody wears both. Basket size runs the same way: a single-line order returns 36% of the time, a five-line order 91%.</p>
+<p>Payment method spreads thirty points top to bottom, almost certainly reflecting how committed the shopper is at checkout rather than anything about the payment rail itself. Customer history barely moves the needle on its own &mdash; and then turns out to be the strongest feature the model has. Worth knowing before anyone dismisses a feature for looking flat in isolation.</p>
+<div class="figs">
+  <figure><img src="../figures/class_separation.png" alt="Left: PCA projection of orders coloured by outcome, showing heavy overlap. Right: histogram of model predicted probability by outcome, showing the classes pulling apart.">
+  <figcaption>Raw features overlap almost completely (left); the model separates them (right). 37.0% of kept orders score below 0.30, and 66.3% of returned orders score above 0.70.</figcaption></figure>
+  <figure><img src="../figures/cluster_return_rates.png" alt="Bar chart of return rate by k-means cluster, running from 47.6% to 95.8%">
+  <figcaption>Clustering the engineered features, with no access to the label, separates the book from a 47.6% to a 95.8% return rate.</figcaption></figure>
+</div>
+<p>The left panel is the honest picture: no single view of the raw data pulls returns apart from keeps. The signal is real but only emerges once features are combined, which is what the model is for. That clustering finds a 48-point spread <em>without ever seeing the outcome</em> is good evidence the structure is in the data rather than invented by the model.</p>
+
+<h2>What the model says</h2>
+<div class="figs">
+  <div style="flex:1.05">
+    <table>
+      <tr><th>Model</th><th>AUC</th><th>Log loss</th><th>Calibration error</th></tr>
+      <tr><td>Raw order attributes (baseline)</td><td>0.7959</td><td>0.5218</td><td>&mdash;</td></tr>
+      <tr><td>Logistic regression, all features</td><td>0.8348</td><td>0.4819</td><td>&mdash;</td></tr>
+      <tr><td>LightGBM, all features</td><td><strong>0.8526</strong></td><td>0.4527</td><td>0.0047</td></tr>
+      <tr><td>XGBoost, all features</td><td>0.8528</td><td>0.4524</td><td>0.0050</td></tr>
+    </table>
+    <p class="big"><strong>Calibration error is 0.0047.</strong> The riskiest tenth of orders is predicted at 0.993 and comes back 0.994 of the time. This is the result the pricing rests on: quote someone 0.40 and they really do return 40% of the time, so that number can be turned into dollars without distortion.</p>
+    <p class="big">XGBoost beats LightGBM by <strong>0.0002</strong>, and the two agree on 99.8% of what they predict. More performance is not hiding in a different algorithm. Logistic regression gets within 0.018 of both, which says the engineered features are doing the work rather than the tree.</p>
+  </div>
+  <figure style="flex:0.68"><img src="../figures/reliability_diagram.png" alt="Reliability diagram tracking the diagonal closely across all ten bins">
+  <figcaption>Predicted against actual, 10 bins, validation set.</figcaption></figure>
+</div>
+<p>The customer's own return history is worth <strong>four times more than any other feature</strong>; bracketing is second. The model's weak spot is equally clear: on <strong>single-line orders it scores 0.696 against 0.858</strong> on multi-line, because with no basket to read it has only the customer's history to go on. Two small payment segments also drift far enough off calibration that I would recalibrate them before trusting their prices.</p>
+
+<h2>How I would price from this</h2>
+<p>A return costs the platform <strong>$8</strong> to ship back and process. Each shopper is then quoted their own expected cost, marked up to a target margin:</p>
+<p class="rule"><strong>price = (probability of return &times; $8) &divide; (1 &minus; margin)</strong></p>
+<p>Because the probability is trustworthy in absolute terms, this earns the target margin on <em>every single order</em> &mdash; the safest shopper and the riskiest alike. Nothing is tuned, and no assumption about shopper behaviour enters the price.</p>
+<table>
+  <tr><th>Risk decile</th><th>Return probability</th><th>Expected claim</th><th>Price at 45%</th><th>Price at 60%</th><th>Earns at 45%</th></tr>
+  <tr><td>1 (safest)</td><td>0.15</td><td>$1.89</td><td><strong>$3.44</strong></td><td>$4.73</td><td>$1.55</td></tr>
+  <tr><td>3</td><td>0.38</td><td>$3.52</td><td>$6.40</td><td>$8.80</td><td>$2.88</td></tr>
+  <tr><td>5</td><td>0.60</td><td>$5.09</td><td>$9.25</td><td>$12.72</td><td>$4.16</td></tr>
+  <tr><td>8</td><td>0.92</td><td>$7.43</td><td>$13.51</td><td>$18.57</td><td>$6.08</td></tr>
+  <tr><td>10 (riskiest)</td><td>0.99</td><td>$7.95</td><td><strong>$14.45</strong></td><td>$19.87</td><td>$6.50</td></tr>
+</table>
+<p>One flat price earning that same 45% across the whole book would be <strong>$11.34</strong>. Against it, the card sells to <strong>20.1% of shoppers rather than 18.0%</strong> at identical profitability &mdash; more customers, same margin, because the safe majority is no longer quoted a price built for somebody else's risk.</p>
+<p><strong>A high quote at the top carries no risk.</strong> A shopper who declines pays their own return shipping, so the platform has no revenue and no claims from them. Quoting the riskiest decile $14.45 costs nothing if they walk. What it does cost is optics &mdash; $19.87 on a $106 order is nearly a fifth of the cart, and that is a merchant conversation.</p>
+
+<h2>Who actually buys, and why that is the real win</h2>
+<p>The obvious objection is that the riskiest shoppers will see $14.45 and decline. They do &mdash; and that is the point.</p>
+<div class="figs">
+  <figure><img src="../figures/selection_flip.png" alt="Left: attach rate by risk decile, rising steeply under the flat rate and almost perfectly flat under the price card. Right: share of policies sold by decile, concentrated in high-risk deciles under the flat rate and evenly spread under the card.">
+  <figcaption>Under one flat price, uptake climbs with risk and the sold book concentrates in the riskiest deciles. Under the card, uptake is nearly identical across all ten.</figcaption></figure>
+</div>
+<table>
+  <tr><th></th><th>Flat $11.34</th><th>Price card</th></tr>
+  <tr><td>Buyers in the safest decile</td><td>7.1%</td><td><strong>19.8%</strong></td></tr>
+  <tr><td>Buyers in the riskiest decile</td><td>28.9%</td><td>20.3%</td></tr>
+  <tr><td>Average risk of the people who buy</td><td>0.755</td><td><strong>0.634</strong></td></tr>
+  <tr><td>Versus the population at 0.632</td><td>+0.123</td><td><strong>+0.002</strong></td></tr>
+  <tr><td>What a sold policy costs to service</td><td>$6.24</td><td><strong>$5.37</strong></td></tr>
+</table>
+<p>One flat price is a bargain for the shopper who knows they will return and a bad deal for the one who knows they will not, so the book fills up with claimants: buyers run <strong>+0.123 riskier than the population</strong> and cost $6.24 each to service. Quote everyone their own expected cost and that arbitrage disappears &mdash; uptake lands between <strong>19.8% and 20.3% across all ten deciles</strong>, and the gap between buyers and everyone else collapses to <strong>+0.002</strong>. Servicing a policy gets 14% cheaper.</p>
+<p>The safest decile nearly triples its uptake and the riskiest falls by nearly a third, and that shift is carried through every revenue and cost figure in this memo &mdash; each is built from who actually buys at the price they are shown, not from an assumption that everyone takes the offer equally. <strong>Adverse selection is not being tolerated here, it is being priced away.</strong></p>
+
+<h2>Scaled to $100M</h2>
+<p>None of this is specific to this retailer, so the same rule can be run against a book with any return rate. Two things fall out.</p>
+<p><strong>The economics do not move.</strong> Every order earns the target margin, so a <strong>$100M coverage book returns $45M at a 45% margin &mdash; whatever the return rate.</strong> One number covers every scenario. <strong>The prices do move:</strong> what changes is the range the card has to span to get there.</p>
+<table>
+  <tr><th>Return rate</th><th>Average claim</th><th>Flat price at 45%</th><th>Card range at 45%</th><th>Card range at 60%</th><th>Contribution on $100M</th></tr>
+  <tr><td>10%</td><td>$1.52</td><td>$3.26</td><td>$1.47 &ndash; $8.92</td><td>$2.03 &ndash; $12.27</td><td>$45M</td></tr>
+  <tr><td>15%</td><td>$1.88</td><td>$4.30</td><td>$1.50 &ndash; $10.98</td><td>$2.06 &ndash; $15.10</td><td>$45M</td></tr>
+  <tr><td>20%</td><td>$2.24</td><td>$5.36</td><td>$1.53 &ndash; $12.28</td><td>$2.11 &ndash; $16.89</td><td>$45M</td></tr>
+  <tr><td>25%</td><td>$2.60</td><td>$6.37</td><td>$1.59 &ndash; $13.09</td><td>$2.18 &ndash; $17.99</td><td>$45M</td></tr>
+  <tr><td>30%</td><td>$2.96</td><td>$7.31</td><td>$1.66 &ndash; $13.58</td><td>$2.29 &ndash; $18.68</td><td>$45M</td></tr>
+  <tr><td>40%</td><td>$3.68</td><td>$8.88</td><td>$1.92 &ndash; $14.10</td><td>$2.64 &ndash; $19.38</td><td>$45M</td></tr>
+  <tr><td>50%</td><td>$4.40</td><td>$10.09</td><td>$2.36 &ndash; $14.32</td><td>$3.25 &ndash; $19.69</td><td>$45M</td></tr>
+  <tr><td><strong>63% (this book)</strong></td><td>$5.35</td><td><strong>$11.34</strong></td><td><strong>$3.44 &ndash; $14.45</strong></td><td>$4.73 &ndash; $19.87</td><td><strong>$45M</strong></td></tr>
+</table>
+<p>At a 20% return rate the one-size price would be $5.36, while the card spans $1.53 to $12.28 &mdash; the safest decile pays a dollar fifty, the riskiest just over twelve. Note the top of the range stays high even on a gentle book: a 10%-return merchant still has a tenth of its shoppers returning most of what they buy, and they are still priced for it. That is the case for pricing the order rather than the merchant.</p>
+<p>The rule needs nothing tuned per book and nothing re-tuned as behaviour drifts &mdash; only a trustworthy probability and the cost of a return.</p>
+
+<p class="note">Measured from the data: every return outcome, all model results, and the claim costs derived from them. Assumed: that a return costs $8 to process. The price card rests on nothing else. Figures for uptake and revenue additionally use a demand curve anchored at 35% of shoppers buying at $5, set in one place and easy to change. Margin throughout is measured on revenue. Gentler return rates are modelled by shifting this book's probabilities down while preserving the model's ranking. Amounts in dollars; the source retailer is euro-denominated, treated 1:1. Code and notebooks: github.com/cooper-rm/ecommerce-returns-ml</p>
+</body></html>
